@@ -777,7 +777,288 @@ def bench_rec(width_list=[320, 256, 192], batch_list=[4, 6]):
 
 ---
 
-*文档更新时间: 2026-04-25 23:55 (PC端优化全部回退，保留经验教训)*
-*适用于: 嵌赛答辩材料 / 项目交接 / 技术复盘 / **★ 开发板端 AI 优化参考 ★***
-*当前状态: ocr_workflow_onnx.py 保持原版配置 (REC_IMAGE_WIDTH=320, RapidOCR默认路径)*
-*下一步: 将此 md 复制到开发板，供 AI 阅读后继续在 ARM+DSP 环境下做 Rec 优化*
+## 十一、开发板端实测最终结论 (2026-04-26)
+
+> **来源**: `板端数据/` 目录下的全部调试日志 (22个脚本 + 详细md)
+> **环境**: QCS6490 Snapdragon 开发板, fiboaisdk (SNPE), ARM 8核 CPU, Adreno GPU
+> **测试图片**: photo_1.jpg (1920x1080), RapidOCR 基准: **88文本框, avg=0.950**
+> **最终结论**: 全 ORT-CPU 是当前唯一正确方案 — 精度完美匹配基准
+
+---
+
+### 11.1 计划 vs 实际 — 架构重大修正
+
+| 维度 | **计划 (第一~九章写的)** | **实际 (板上实测结果)** |
+|:-----|:------------------------:|:----------------------:|
+| Det 后端 | **DLC → DSP 硬件加速** | ❌ DSP/GPU/CPU 输出固定 640×640, 仅12框 |
+| Cls 后端 | **DLC → 统一管理** | ❌ DLC-GPU 系统性误旋转20/88框, 损失19%文本 |
+| Rec 后端 | ONNX → ORT-CPU | ✅ 与计划一致 (MobileOne无法转DLC) |
+| **最终方案** | 异构混合推理 (SNPE+ORT) | **全 ORT-CPU 多线程** |
+
+**根因总结**:
+- **Det DLC**: 编译期固化输出 shape=640×640, 高分辨率输入时概率被稀释。多图块检测调到88框但坐标偏移1-5px导致Rec成功率仅38%
+- **Cls DLC**: 存在未知的精度损失(INT8量化? FP16?), 对20个框错误判断为ROT180(置信度0.906~0.998), 导致文字倒置后Rec输出blank token
+- **Rec INT8(官方模型)**: 校准集与本项目输入不匹配, CTC概率被破坏, 74条中58%变空串, 剩余全乱码
+
+---
+
+### 11.2 各方案实测对比总表
+
+| # | Det后端 | Cls后端 | Rec后端 | Texts | AvgScore | 总耗时 | 状态 |
+|:-:|:-------:|:-------:|:-------:|:-----:|:--------:|:------:|:----:|
+| 1 | ORT-CPU | ORT-CPU | ORT-FP32 | **88** | **0.949** | **12.95s** | ★★★ **最优** |
+| 2 | ORT-CPU | DLC-GPU | ORT-FP32 | 71 | 0.928 | ~14s | ✗ Cls误旋转 |
+| 3 | DLC-CPU(多图块) | SDK-CPU | ORT-FP32 | ~15 | 0.65* | ~28s | ✗ Rec质量差 |
+| 4 | DLC-GPU | — | — | 0-8 | <0.20 | — | ✗ 全噪声 |
+| 5 | ORT-CPU | ORT-CPU | INT8(官方) | 31 | 0.213 | ~8.5s | ✗ 精度崩 |
+| 6 | RapidOCR(PC基准) | ORT-CPU | ORT-FP32 | 88 | 0.950 | ~14s | ✓ 参考线 |
+
+> *注: 方案3的 score 是检测置信度非 Rec 分数
+
+---
+
+### 11.3 最终生产配置与性能基线
+
+```python
+# ocr_board.py 最终配置 (2026-04-26 确认)
+USE_DLC_DET = False              # Det: ORT-CPU (动态分辨率, 高精度)
+USE_DLC_CLS = False              # Cls: ORT-CPU (零误旋转)
+REC_ONNX = 'ch_PP-OCRv4_rec_mobile.onnx'  # FP32 (官方INT8不可用)
+intra_op_num_threads = 4          # ARM 多核 (已验证最优)
+REC_BATCH_NUM = 16
+DET_LIMIT_SIDE_LEN = 736
+DET_LIMIT_TYPE = 'min'
+DET_THRESH = 0.20
+DET_BOX_THRESH = 0.35
+CLS_THRESH = 0.90
+TEXT_SCORE_THRESH = 0.4
+```
+
+**性能分布 (photo_1.jpg, 1920×1080)**:
+
+| 阶段 | 耗时 | 占比 | 说明 |
+|:----:|:----:|:----:|:-----|
+| Det | 1.70s | 13% | ORT-CPU, 动态分辨率 |
+| Cls | 0.31s | 2% | ORT-CPU, batch=55~88 |
+| Rec | 10.86s | **84%** | ORT-CPU, batch=16, **绝对瓶颈** |
+| 其他 | 0.08s | 1% | 预处理/后处理 |
+| **总计** | **~12.95s** | **100%** | **88/88文本, avg=0.949** |
+
+---
+
+### 11.4 核心经验教训 (精简版)
+
+#### 教训1: 硬件加速 ≠ 一定更快更好
+DSP/GPU 加速需满足: 模型适合硬件、I/O shape匹配、数值精度满足、batch支持。
+本项目三个条件均不满足 → ORT-CPU 多线程反而是最优解。
+
+#### 教训2: DLC 编译参数决定一切, 且不可逆
+ONNX→DLC 转换一旦固化输出 shape, 运行时无法改变。转换前必须确认动态 shape 行为。
+
+#### 教训3: 端到端精度 > 单模块速度
+Det从88→12框、Cls导致71文本、Rec 58%空串 — 过度追求单模块加速的代价是无法接受的。
+
+#### 教训4: PC端优化结论不能直接照搬到ARM端
+- PC端: 增大Batch反而慢17%(L2缓存限制)、改YAML配置反而慢
+- ARM端: 可能完全不同(核少cache小), 但本次因DLC精度问题未能验证
+
+---
+
+### 11.5 后续真正可行的优化方向
+
+当前瓶颈明确: **Rec 占 84% (10.86s)**。以下是按可行性排序的方向:
+
+| # | 方向 | 思路 | 预期收益 | 难度 | 备注 |
+|:-:|:-----|:-----|:--------:|:----:|:-----|
+| P0 | 增大 REC_BATCH_NUM | 16→32 | Rec -15~25% | 极低 | 纯配置修改 |
+| P1 | 降低 Rec 输入宽度 | 320→256 | Rec -20% | 低 | 精度损失<2%, ARM端待验证 |
+| P2 | 替换非MobileOne Rec | v3(MV3)/server(SVTR) | 可能跑DLC+DSP | 中 | 需重新转换模型 |
+| P3 | CPU亲和性绑定 | taskset绑大核 | 整体+10~20% | 低 | ARM平台特有 |
+| P4 | 跳过Cls | 文字不倒置时可省 | 省0.31s | 低 | 取决于拍摄角度固定性 |
+| P5 | 自定义校准集INT8量化 | 用项目实际图片做校准 | Rec可能+30~50% | 中 | 需要PC端工具链 |
+
+> ⚠️ 第八章/第九章的理论建议(P0 batch增大/P1宽度降低)在**PC端已验证无效或效果极微**,
+> 但在**ARM+全ORT-CPU环境**下值得重新验证, 因为瓶颈分布不同(Rec占84% vs PC端55%)。
+
+---
+
+### 11.6 详细调试日志索引
+
+以下文件包含完整的调试过程、参数搜索数据、逐框分析结果:
+
+```
+板端数据/
+├── PROJECT_SUMMARY.md              ← 完整版技术文档 (1256行, 12章)
+│   第十章: 开发板实际部署测试 (SDK适配/DLC固定输出/Cls batch问题)
+│   第十一章: 待解决问题与改进计划
+│   第十二章: GPU 硬件加速改造 (DLC-GPU 尝试)
+│
+└── Log/
+    ├── dlc_det_optimization_log.txt  ← ★ 核心日志: 多图块检测 + Cls误分类根因
+    │   Phase 1-4: Det DLC多图块参数搜索 (22个脚本, 4轮网格扫描)
+    │   Phase 5:   ★ Cls DLC-GPU 误旋转根因诊断 (20/88框证据表)
+    │   最终方案:  全ORT-CPU对比总表
+    │
+    ├── dlc_gpu_acceleration_guide.md ← DLC-GPU 加速指南
+    └── [其余 20 个 .txt 日文]          ← 各阶段原始输出/中间分析
+```
+
+**调试脚本清单 (22个 `_debug_*.py`)**:
+- Phase 1: `_debug_dlc_system.py` — DLC vs ORT 基准对比
+- Phase 2: `_debug_optimize{,_v2}.py` — 多图块+NMS实验
+- Phase 3: `_debug_fast{,_v2,_v3}.py` + `_debug_finetune.py` + `_debug_score_scan.py` + `_debug_precise.py` — 参数网格搜索
+- Phase 4-5: `_debug_gap.py`, `_debug_missing.py`, `_debug_det_params.py`, `_debug_diagnose.py`, `_debug_box_detail.py`, `_debug_crop_diag.py`, `_debug_rec_raw.py`, `_debug_box_compare.py`, `_debug_cls_culprit.py`, `_debug_cls_vs_ort.py` — 根因诊断链
+- 其他: `_debug_rec_int8.py`, `_debug_rec_thread.py`, `_debug_cls_gpu_recovery.py`
+
+---
+
+---
+
+## 十二、EasyOCR ONNX 探索记录 (2026-04-27)
+
+> **目标**: 评估高通 AI Hub 预编译的 EasyOCR 模型是否可作为 PaddleOCR 的替代方案
+> **结论**: ❌ **不可行** — 预编译模型为英文专用(97类)，中文版导出失败
+> **最终选择**: 继续使用 PaddleOCR v4 (PP-OCRv4) 作为唯一 OCR 引擎
+
+---
+
+### 12.1 探索背景与动机
+
+| 动机 | 说明 |
+|:-----|:-----|
+| **备选方案** | 若 PaddleOCR Rec 无法加速，考虑换用 EasyOCR |
+| **官方支持** | 高通 AI Hub 提供预编译 EasyOCR ONNX/DLC 模型 |
+| **多语言** | EasyOCR 原版支持 80+ 语言（含中文 ch_sim） |
+
+---
+
+### 12.2 技术探索过程
+
+#### Step 1: 获取预编译模型
+
+从高通 AI Hub / HuggingFace 下载了两个版本：
+
+```
+easyocr-onnx-float/easyocr-onnx-float/
+├── detector.onnx          (CRAFT 文本检测器, ~5.9MB)
+├── recognizer.onnx        (CRNN 文本识别器, ~11MB)
+└── metadata.json
+
+easyocr-onnx-w8a8/easyocr-onnx-w8a8/
+├── detector.onnx          (w8a8 量化版, IR v12)
+├── recognizer.onnx        (w8a8 量化版, IR v12)
+└── metadata.json
+```
+
+#### Step 2: Python 3.8 兼容性障碍
+
+| 问题 | 解决方案 | 结果 |
+|:-----|:---------|:-----|
+| onnxruntime 不支持 IR v12 (最高 v10) | 将 IR version 从 12 降到 10 | ✅ 可加载 |
+| w8a8 QDQ 格式输出为 uint8 | 尝试反量化 → 去量化转 float | ⚠️ 图结构破坏 |
+| 最终方案 | 放弃 w8a8，改用 float 版本 | ✅ 正常运行 |
+
+#### Step 3: Float 模型跑通
+
+编写 `test_easyocr_w8a8.py` 完整测试脚本（~420行），实现：
+
+```
+EasyOCR ONNX 推理流程:
+┌──────────┐    ┌──────────────┐    ┌──────────┐    ┌──────────┐
+│ 原始图像   │ →  │ CRAFT Detector │ →  │ 后处理     │ →  │ 文本区域   │
+│ RGB       │    │ (ONNX float)  │    │ getDetBoxes│   │ 裁剪      │
+└──────────┘    └──────────────┘    └──────────┘    └────┬─────┘
+                                                           ↓
+┌──────────┐    ┌──────────────┐    ┌──────────┐    ┌──────────┐
+│ CTC解码   │ ←  │ CRNN Recognizer│ ←  │ 灰度+标准化 │ ←  │ 灰度转换   │
+│ Greedy    │    │ (ONNX float)  │    │ (x-128)/128│   │ resize   │
+└──────────┘    └──────────────┘    └──────────┘    └──────────┘
+```
+
+**实测结果 (photo_1.jpg, 药品说明书)**:
+
+| 指标 | EasyOCR float (ONNX) | PaddleOCR v4 (FP32) |
+|:----:|:---------------------:|:-------------------:|
+| 检测文本数 | 2 条 (`"Z("`, `"ZFC"`) | **74 条** |
+| 耗时 | **0.61s** | 5.28s |
+| 中文识别 | ❌ 全部乱码 | ✅ 完美 |
+
+#### Step 4: 根因分析 — 英文专用模型
+
+```python
+# metadata.json 关键信息:
+"input_image": { "shape": [1, 3, 608, 800], "dtype": "float32" }
+"output_preds": { "shape": [1, 199, 97] }     # ★ 97 类 = ASCII 字符集
+# easyocr_md/model.py 第36行:
+LANG_LIST = ["en"]  # ★ 硬编码英文
+```
+
+**97 类字符表**: 0=blank + 96 个可打印 ASCII 字符 (0-9, a-z, A-Z, 标点)
+**中文需要**: ~5000+ 类 (简体中文字典)
+
+---
+
+### 12.3 中文版导出尝试
+
+| 方法 | 结果 | 失败原因 |
+|:-----|:----:|:---------|
+| 高通 AI Hub `--lang ch_sim` | ❌ 未找到现成下载 | 只有英文预编译包 |
+| EasyOCR 库导出 ONNX (Detector) | ✅ 成功 | CRAFT 无动态 shape 问题 |
+| EasyOCR 库导出 ONNX (Recognizer) | ❌ 失败 | AdaptiveAvgPool2d 动态尺寸不支持静态导出 |
+| EasyOCR 库直接推理 (跳过ONNX) | ✅ 可用 | 但无法部署到开发板 |
+
+#### EasyOCR 中文直接推理结果:
+
+| 指标 | EasyOCR 中文 (ch_sim+en) | PaddleOCR v4 (FP32) |
+|:----:|:------------------------:|:-------------------:|
+| 检测文本数 | **136 条** (大量碎片化) | 74 条 (干净) |
+| 耗时 | 12.91s | **5.28s** |
+| 低分结果占比 | >50% (score < 0.1) | <5% (score > 0.9) |
+
+---
+
+### 12.4 最终结论
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  EasyOCR 可行性评估                      │
+├──────────────┬──────────────────────────────────────────┤
+│ 预编译 ONNX  │ ❌ 仅英文(97类), 中文不可用               │
+│ 中文 ONNX 导出│ ❌ CRNN 含动态 OP, 无法静态导出           │
+│ 直接库调用   │ ⚠️ 能用但慢(12.9s), 且无法部署到板端      │
+│ vs PaddleOCR │ ❌ 全面落后: 精度/速度/部署灵活性均不如    │
+├──────────────┴──────────────────────────────────────────┤
+│  结论: 放弃 EasyOCR, 继续优化 PaddleOCR v4              │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 12.5 经验教训
+
+1. **预编译模型不等于完整方案** — 高通 AI Hub 的 EasyOCR 只打了英文子集
+2. **IR 版本兼容性** — onnxruntime 1.x 在 Python 3.8 上只支持 IR ≤10，新模型需降级或升级运行时
+3. **QDQ 量化格式** — w8a8 模型的 QuantizeDequantize 节点在降级后容易破坏图结构
+4. **CRAFT 后处理复杂度** — 文字检测的后处理（score_map → text box）比 DBNet 复杂得多
+5. **字符表决定一切** — 97 类 vs 6623 类，模型能力天差地别
+
+### 12.6 产出物清单
+
+| 文件/目录 | 说明 | 保留? |
+|:----------|:-----|:-----:|
+| `test_easyocr_w8a8.py` | EasyOCR ONNX 完整推理脚本 (~420行) | ✅ 保留供参考 |
+| `easyocr-onnx-float/` | 英文 float 模型 | ⚠️ 可删(仅英文) |
+| `easyocr-onnx-w8a8/` | 英文 w8a8 量化模型 | ⚠️ 可删(仅英文) |
+| `easyocr_md/` | 高通 AI Hub 例程代码 | ✅ 保留(有参考价值) |
+| `_export_chinese_easyocr.py` | 中文模型导出脚本 | ❌ 临时文件 |
+| `_test_easyocr_ch.py` | EasyOCR 中文直接推理 | ❌ 临时文件 |
+| `_check_quant.py` | 量化参数检查 | ❌ 临时文件 |
+| `_dequant.py` | 去量化脚本 | ❌ 临时文件 |
+| `_downgrade_onnx.py` | IR 降级脚本 | ❌ 临时文件 |
+| `_run_paddle.py` | PaddleOCR 对比脚本 | ❌ 临时文件 |
+| `_fix.py` | f-string 修复 | ❌ 临时文件 |
+| `_ch_test_out.txt` | 中文测试输出 | ❌ 临时文件 |
+| `_paddle_out.txt` | Paddle 输出 | ❌ 临时文件 |
+
+---
+
+*文档更新时间: 2026-04-27 (EasyOCR 探索完结)*
+*适用于: 嵌赛答辩材料 / 项目交接 / 技术复盘*

@@ -1,0 +1,4 @@
+Logging started for program DebugLog on host qcs6490-odk at Sun Apr 26 2026 15:17:49.400633 (this log file is /home/fibo/cv/Log/DebugLog.08.txt)
+15:17:49.520575196 [USER_ERROR:DNN_RUNTIME] DEFAULT:0 GPU ERROR: GPU_ERROR_UNSUPPORTED(10018) - Setting context priority after context initialization not supported
+15:17:49.520592227 [USER_ERROR:DNN_RUNTIME] DEFAULT:1 6000 | QnnContext_setConfig() failed; QNN_CONTEXT_ERROR_INVALID_ARGUMENT: An argument to QNN context API is deemed invalid by a backend
+Logging stopped at Sun Apr 26 2026 15:17:55.949297

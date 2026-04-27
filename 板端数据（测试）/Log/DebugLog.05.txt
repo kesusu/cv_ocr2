@@ -1,0 +1,3 @@
+Logging started for program DebugLog on host qcs6490-odk at Sun Apr 26 2026 15:16:16.823639 (this log file is /home/fibo/cv/Log/DebugLog.05.txt)
+15:16:16.923279622 [USER_ERROR:DNN_RUNTIME] DEFAULT:0 6000 | QnnContext_setConfig() failed; QNN_CONTEXT_ERROR_INVALID_ARGUMENT: An argument to QNN context API is deemed invalid by a backend
+Logging stopped at Sun Apr 26 2026 15:16:19.041437

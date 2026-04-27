@@ -1,3 +1,7 @@
 # 永久忽略这两个文件夹
 yolo人体检测/
 暂放（千问）/
+easyocr_md/
+easyocr-onnx-float/
+easyocr-onnx-w8a8/
+qual_dlc版本高了/
