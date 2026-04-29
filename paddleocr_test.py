@@ -7,8 +7,8 @@ from paddleocr import PaddleOCR
 
 # -------------------- 配置 --------------------
 test_images = [
-    "photos/photo_1.jpg",
-    "photos/photo_2.jpg",
+    "photos/photo_12.jpg",
+    #"photos/photo_2.jpg",
 ]
 
 # -------------------- 初始化模型 --------------------

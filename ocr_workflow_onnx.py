@@ -1,15 +1,31 @@
 """
+OCR 工作流 — 图片识别 / 摄像头拍照识别
 =============================================================
-  OCR 工作流：图片识别 / 摄像头拍照识别
-=============================================================
-  依赖：pip install rapidocr opencv-python numpy psutil
+依赖: pip install rapidocr opencv-python numpy psutil
+用法: python ocr_workflow_onnx.py
 
-  ★★★ 使用方法：只改下面配置区的变量，然后直接运行即可 ★★★
-  
-  ★ 2026-04-25 更新：Rec 模型专项优化 ★
-  - 可调 Rec 输入宽度 (320/256/192)
-  - 可调批处理大小 (6/12/16)
-  - 基准测试对比各配置效果
+识别结果: 直接打印到终端 (控制台)
+拍照保存: photos/ 目录下 (摄像头模式自动保存 jpg)
+
+★ 只需改下方配置区，然后运行即可 ★
+
+常用配置 (每次使用可能需要调整):
+  MODE              运行模式: 1=图片识别  2=摄像头拍照+OCR
+  IMAGE_PATHS       模式1要识别的图片路径列表(支持多张)
+  ENABLE_PREPROCESS 图像预处理: True开(模糊/光照不均时)  False关(清晰扫描件)
+
+功能开关:
+  FILTER_KEYWORDS   屏蔽关键词列表(含这些词的结果不显示,如OSD水印)
+  HIDE_DRUG_META    药品说明书章节屏蔽: 0=显示全部  1=屏蔽法定信息章节
+  HIDE_SECTION_HEADERS 屏蔽的章节标题列表(可自行增减)
+  SHOW_SCORES       置信度显示: 1=显示[0.95](调试)  0=隐藏(正式输出简洁)
+
+高级参数 (一般不需改):
+  OCR_PARAMS        Det检测阈值/置信度阈值
+  USE_INT8_REC      Rec模型: 0=FP32(推荐)  1=INT8量化(GPU/NPU设备用)
+  ORT_THREADS       推理线程数 (-1=全核自动)
+  REC_BATCH_NUM     Rec批处理大小
+  REC_IMAGE_WIDTH   Rec输入宽度 (保持320默认最快)
 """
 
 import os
@@ -21,81 +37,142 @@ from rapidocr import RapidOCR
 
 
 # ============================================================
-#  ★★★ 配置区（改这里就行）★★★
+#  ★ 配置区（改这里就行）★★★
 # ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, 'photos')
 
-# ── 模式选择（填数字）──
+# ── 模式选择 ──
 MODE = 1   # 1=图片识别    2=摄像头拍照+识别
 
-# ── 模式1：填图片路径（多张放列表里）──
+# ── 模式1：填要识别的图片路径（多张放列表，# 注释掉不需要的）──
 IMAGE_PATHS = [
-     "photos/photo_1.jpg",
+     "photos/photo_10.jpg",
     # "photos/藿香正气水.jpg",
-    #"photos/细菌溶解产物胶囊.jpg",       # ← 示例：只识别这一张
+    #"photos/细菌溶解产物胶囊.jpg",
 ]
 
-# ── 预处理开关（模糊/光照不均时开）──
-ENABLE_PREPROCESS = False   # True=启用预处理  False=不用
+# ── 预处理开关（模糊/光照不均时开，清晰扫描件可关）──
+ENABLE_PREPROCESS = True
 
-# ── 过滤关键词（包含这些词的识别结果不打印，如摄像头OSD水印）──
-FILTER_KEYWORDS = [
-    "MJPG", "fps", "CPU:", "RAM:", "App:", "Photos:", "SPACE:",
-    "shot", "quit",
+# ── ★ 屏蔽关键词：包含这些词的 OCR 结果不显示 ──
+#     例：摄像头 OSD 水印 "fps" "CPU:" 等，或自定义不想显示的文字
+#     → 在下面列表里加/删即可 (第49行) ←
+FILTER_KEYWORDS = [           # ← 第49行：在此添加/删除过滤关键词
+    "MJPG", "fps", "CPU:", "RAM:", "App:", "Photos:", "Photas:",
+    "SPACE:", "shot", "quit",
 ]
 
-# ── OCR 参数（一般不用动）──
+# ── ★ 屏蔽药品说明书元信息章节 ──
+#     0=显示全部    1=屏蔽以下章节（执行标准/批准文号/生产企业等）
+HIDE_DRUG_META = 1            # ← 第64行：0关 1开
+
+# 需要屏蔽的章节标题 (以【开头】结尾)
+HIDE_SECTION_HEADERS = [       # ← 第67行：在此增减屏蔽的章节
+    "【执行标准】", "【批准文号】", "【说明书修订日期】",
+    "【上市许可持有人】", "【生产企业】", "【包装】", 
+]
+
+# ── ★ 显示置信度分数 ──
+#     1=每条结果后显示 [0.95] 这样的分数 (调试用)
+#     0=不显示分数 (正式输出更简洁)
+SHOW_SCORES = 0                # ← 第76行：1显示  0隐藏
+
+# ── OCR 检测参数（一般不用动）──
 OCR_PARAMS = {
     "Det.thresh": 0.20,
-    "Det.box_thresh": 0.35,
-    "Global.text_score": 0.4,
+    "Det.box_thresh": 0.35,   # 文本框检测阈值 (调低→多检测但噪声增多)
+    "Global.text_score": 0.4, # 置信度过滤阈值
 }
 
-# ── rec 模型选择（量化/原始）──
-#   0 = FP32 原始模型 (默认，稳定可靠)
-#   1 = INT8 量化模型 (体积略小，精度无损，适合 GPU/NPU 加速设备)
-USE_INT8_REC = 0
+# ── Rec 模型选择 ──
+USE_INT8_REC = 0              # 0=FP32原始(默认推荐)   1=INT8量化(GPU/NPU设备用)
 
-# ── ONNX Runtime 性能优化 ──
-ORT_THREADS = -1          # 推理线程数 (-1=自动/全核)
-REC_BATCH_NUM = 6         # rec 批处理大小 (6=默认, 文字多可调大; 内存紧张调小)
-
-# ══════════ ★ Rec 加速核心参数 ★ ══════════
-#   来自 PROJECT_SUMMARY.md 第八章 + 第九章的优化方案
-#   ★ 2026-04-25 基准测试重要发现 ★
-#     - 改宽度需要自定义YAML，而自定义YAML比RapidOCR默认配置慢!
-#     - 结论: 保持默认 320，让 RapidOCR 用内部最优配置 = 最快路径
-REC_IMAGE_WIDTH = 320     # rec 输入宽度 (保持默认=最快)
-                          #   320 = 默认 (★ 最优: 走 RapidOCR 默认路径)
-                          #   256/192 = 需要自定义YAML (实测反而更慢)
-ENABLE_BENCH_MODE = False  # True = 运行基准测试 (对比各配置)
-                          # False = 正常 OCR 识别模式
+# ── 性能参数 ──
+ORT_THREADS = -1              # 推理线程数 (-1=全核自动)
+REC_BATCH_NUM = 6             # 批处理大小 (文字多可调大)
+REC_IMAGE_WIDTH = 320         # Rec输入宽度 (保持默认=最快)
+ENABLE_BENCH_MODE = False     # True=跑基准测试对比    False=正常识别
 
 
 # ============================================================
 #  图像预处理
 # ============================================================
 
+def _adaptive_brightness_fix(img):
+    """
+    自适应亮度校正 (在 preprocess_image 之前调用)
+    
+    核心洞察:
+      - 真正过曝的照片: mean>200 (画面发白, 文字糊掉)
+      - 正常白底说明书:   mean=165~195 (纸是白的, 但文字清晰)
+      - 暗部不足的照片:   mean<140 但std很小 (需要提亮, 本函数不处理)
+    
+    所以 brightness 触发线必须设高 (195+), 否则会对正常白底图误伤。
+    std 触发线保留为低对比度的安全网。
+    
+    不触发时直接返回原图, 零开销。
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mean_val = float(gray.mean())
+    std_val = float(gray.std())
+    
+    # ★ 触发条件 (2026-04-29 v3):
+    #   mean>180: 明显偏亮 (白底说明书通常 165~195, 但180以下可能需要轻微校正)
+    #   std<35:   动态范围极窄 (画面接近纯灰, 文字几乎不可见)
+    needs_fix = mean_val > 180 or std_val < 35
+    
+    if not needs_fix:
+        return img  # 画质正常或正常亮白底, 跳过
+
+    # ★ Gamma 校正 (只对真正过曝的图生效)
+    #   范围: 1.2(轻微) ~ 1.65(严重)
+    if mean_val > 170:
+        bright_score = max((mean_val - 180) / 70, 0)  # 180~250 → 0~1
+        low_contrast = max((40 - std_val) / 25, 0) if std_val < 40 else 0
+        
+        severity = max(bright_score, low_contrast * 0.6)
+        severity = min(severity, 1.0)
+        
+        gamma = 1.2 + severity * 0.45  # range: 1.20 ~ 1.65
+        table = np.array([np.clip(((i / 255.0) ** gamma) * 255, 0, 255)
+                          for i in range(256)], dtype='uint8')
+        img = cv2.LUT(img, table)
+    
+    return img
+
+
 def preprocess_image(img):
     """
-    ★ OCR 专用图像预处理 ★
-    流程：锐化 → CLAHE对比度增强 → 轻微去噪
+    ★ OCR 专用图像预处理 (相机拍摄优化版) ★
+    
+    策略: 不做全局上采样(避免4倍像素拖慢速度),
+         只做锐化+CLAHE对比度增强来改善文字可读性
+    
+    漏字问题根因分析 (photo_4.jpg):
+      原始: 【贮藏】遮光，密封保存。
+      识别: 【亡藏】光，密封保存。(score=0.84)
+      
+      原因链: 
+        相机距离远 → 文字行高仅24px(需>=32px) 
+                → 锐度仅185(需>300) 
+                → 复杂汉字(贮/遮)笔画粘连丢失
     
     适用场景：
+      - 相机拍摄的文档/说明书
       - 光照不均 / 有阴影
-      - 照片模糊 / 手抖
-      - 低光 / 噪点多
+      - 照片模糊 / 手抖 / 文字偏小
     
-    注意：清晰照片不需要预处理，PP-OCRv4 内部已有完善处理。
-          此函数作为兜底，在识别效果差时启用。
+    注意：清晰扫描件可关闭 ENABLE_PREPROCESS 加速 (~2x提速)。
     """
-    # Step 1: Unsharp Mask 锐化 (文字边缘更清晰)
-    blurred = cv2.GaussianBlur(img, (0, 0), 2.5)
-    sharp = cv2.addWeighted(img, 1.4, blurred, -0.4, 0)
+    # Step 1: Unsharp Mask 锐化 (恢复文字边缘细节)
+    blurred = cv2.GaussianBlur(img, (0, 0), 2.0)
+    sharp = cv2.addWeighted(img, 1.45, blurred, -0.45, 0)
 
-    # Step 2: CLAHE 局部对比度增强 (应对光照不均)
+    # Step 2: CLAHE 局部对比度增强 (应对光照不均+提升暗部文字)
+    # ★ clipLimit=2.5 (原3.0): 更保守,避免过度增强导致笔画变形
+    #   实测: CL=3.0 时 "欣"→"政", CL=2.5 正确识别
     lab = cv2.cvtColor(sharp, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -103,10 +180,11 @@ def preprocess_image(img):
     enhanced = cv2.merge([l, a, b])
     result = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
-    # Step 3: 非局部均值去噪 (保留边缘，去除摄像头噪点)
-    result = cv2.fastNlMeansDenoisingColored(
-        result, None, h=7, templateWindowSize=5, searchWindowSize=15
-    )
+    # Step 3: 去噪已移除
+    # ★ 原 fastNlMeansDenoisingColored(h=6) 会导致:
+    #   "雷蒙欣" → "需蒙政"(雷→需, 欣→政)
+    #   原因: 去噪模糊了中小字号汉字的细笔画
+    #   替代方案: 锐化+CLAHE 已足够压制摄像头噪点
 
     return result
 
@@ -207,7 +285,9 @@ def sort_boxes_by_layout(boxes, texts, scores, mode="auto"):
     mode:
       - "auto": 自动检测单列/双列
       - "single": 单列 (从上到下)
-      - "double": 双列 (先左列从上到右，再右列从上到下)
+      - "double": 双列 (先左列从上到下，再右列从上到下)
+    
+    ★ 双栏改进: KMeans 聚类分栏 + 逐行交错输出
     """
     if boxes is None or len(boxes) == 0:
         return boxes, texts, scores
@@ -229,13 +309,33 @@ def sort_boxes_by_layout(boxes, texts, scores, mode="auto"):
         indices = np.argsort(y_centers)
 
     elif mode == "double":
-        x_mid = (x_centers.max() + x_centers.min()) / 2
-        left_mask = x_centers <= x_mid
-        right_mask = x_centers > x_mid
-        left_indices = np.where(left_mask)[0]
-        right_indices = np.where(right_mask)[0]
-        left_sorted = left_indices[np.argsort(y_centers[left_indices])]
-        right_sorted = right_indices[np.argsort(y_centers[right_indices])]
+        # ── 改进: IQR 去除边缘离群值 → 在主体文字中找最大间隙 ──
+        q1, q3 = np.percentile(x_centers, [25, 75])
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+
+        # 只在主体区域内找分栏线
+        core_mask = (x_centers >= lower_bound) & (x_centers <= upper_bound)
+        if np.sum(core_mask) >= 4:
+            core_x = sorted(x_centers[core_mask])
+            core_gaps = np.diff(core_x)
+            max_gap_idx = np.argmax(core_gaps)
+            split_x = (core_x[max_gap_idx] + core_x[max_gap_idx + 1]) / 2
+        else:
+            # 数据太少，回退到中位数
+            split_x = (x_centers.max() + x_centers.min()) / 2
+        
+        left_mask = x_centers <= split_x
+        right_mask = x_centers > split_x
+        
+        left_idx = np.where(left_mask)[0]
+        right_idx = np.where(right_mask)[0]
+
+        # 各栏内按 Y 排序 → 先左栏完整输出, 再右栏
+        left_sorted = left_idx[np.argsort(y_centers[left_idx])]
+        right_sorted = right_idx[np.argsort(y_centers[right_idx])]
+        
         indices = np.concatenate([left_sorted, right_sorted])
 
     else:
@@ -345,7 +445,16 @@ class OCREngine:
 
         # 可选预处理
         if ENABLE_PREPROCESS:
-            img = preprocess_image(img)
+            img = _adaptive_brightness_fix(img)   # 自适应亮度校正(仅严重过曝时触发)
+            # ★ 画质足够好时跳过锐化+CLAHE (避免对正常白底说明书误伤)
+            #   正常白底说明书/扫描件: mean∈[155,195] 且 std>=22 → 原图OCR更好, 跳过
+            #   过曝/偏暗/模糊照片: mean<155 或 mean>195 或 std<22 → 需要增强
+            gray_check = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            m_check = float(gray_check.mean())
+            s_check = float(gray_check.std())
+            needs_enhance = m_check <= 155 or m_check >= 195 or s_check < 22
+            if needs_enhance:
+                img = preprocess_image(img)            # 锐化+CLAHE
 
         # OCR 识别
         output = self._ocr(img)
@@ -408,41 +517,70 @@ def find_best_camera():
 
 
 def setup_camera(cap):
-    """设置摄像头参数 - 优化文字拍摄清晰度"""
-    # 分辨率 & 帧率
+    """
+    设置摄像头参数 - 只设分辨率/格式/MJPG, 不动进光量参数
+    (亮度/曝光/增益由摄像头AE自动管理, 避免过曝和拖影)
+    """
+    # --- 分辨率 & 帧率 ---
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_FPS, 30)
-    # MJPG 格式 (原生支持，清晰度最好)
+
+    # --- MJPG格式 (原生支持, 清晰度最好) ---
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    # 图像优化
-    cap.set(cv2.CAP_PROP_BRIGHTNESS, 160)
-    cap.set(cv2.CAP_PROP_CONTRAST, 150)
-    cap.set(cv2.CAP_PROP_SATURATION, 115)
-    try:
-        cap.set(cv2.CAP_PROP_SHARPNESS, 200)
-    except Exception:
-        pass
-    try:
-        cap.set(cv2.CAP_PROP_GAIN, 100)
-    except Exception:
-        pass
-    try:
-        cap.set(cv2.CAP_PROP_EXPOSURE, -3)
-    except Exception:
-        pass
-    try:
-        cap.set(cv2.CAP_PROP_AUTO_WB, 1)
-    except Exception:
-        pass
+
+    # --- 以下参数不再手动设置 ---
+    # BRIGHTNESS / EXPOSURE / GAIN: 由摄像头自动AE管理
+    #   设定值会导致: ① 过曝(已验证) ② 曝光时间过长→拖影
+    # SHARPNESS / CONTRAST / SATURATION: 保持出厂默认
+    # AUTO_WB: 默认开启
+
+
+def _sharpness_score(frame):
+    """计算图像清晰度评分 (Laplacian 方差), 值越大越清晰"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+
+def _smart_shutter(cap, wait_ms=350, burst=5):
+    """
+    智能快门: 解决手持拍照拖影问题
+    
+    流程:
+      1. 等待 wait_ms 毫秒 (让手停稳)
+      2. 连续抓取 burst 帧
+      3. 用 Laplacian 方差选最清晰的一帧
+    
+    返回: 最清晰的 frame
+    """
+    start = time.time()
+    while (time.time() - start) * 1000 < wait_ms:
+        cap.read()
+
+    best_frame = None
+    best_score = -1
+    for _ in range(burst):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            score = _sharpness_score(frame)
+            if score > best_score:
+                best_score = score
+                best_frame = frame.copy()
+
+    if best_frame is None:
+        ret, best_frame = cap.read()
+        if not ret or best_frame is None:
+            return None
+    return best_frame
 
 
 def camera_mode(ocr_engine):
-    """摄像头模式：实时预览 + 按空格拍照 + 自动识别"""
+    """摄像头模式：实时预览 + 智能快门(防抖) + 自动识别"""
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     print("=" * 50)
     print("  USB Camera - IMX577 (1920x1080 @30fps)")
+    print("  Smart Shutter: ON (anti-shake, 5-frame burst)")
     print("=" * 50)
 
     cam_idx = find_best_camera()
@@ -463,11 +601,27 @@ def camera_mode(ocr_engine):
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 960, 540)
 
-    print(f"[OK] {w}x{h} | SPACE=拍照+识别  Q=退出\n")
-    print("提示: 拍照后会自动进行 OCR 识别\n")
+    # 自动接续已有编号
+    def _next_id():
+        max_id = 0
+        for f in os.listdir(SAVE_DIR):
+            import re
+            m = re.match(r'photo_(\d+)\.', f)
+            if m:
+                max_id = max(max_id, int(m.group(1)))
+        return max_id + 1
 
-    photo_count = 0
+    photo_count = _next_id()
     fps_list, t_last, fps_show = [], time.time(), 0
+
+    has_psutil = True
+    try:
+        import psutil
+    except:
+        has_psutil = False
+
+    print(f"[OK] {w}x{h} | SPACE=拍照(防抖)  Q=退出\n")
+    print("提示: 按空格后等待~350ms稳定, 连拍5帧选最清晰\n")
 
     while True:
         ret, frame = cap.read()
@@ -483,10 +637,20 @@ def camera_mode(ocr_engine):
             fps_show = len(fps_list)
             t_last = now
 
+        cpu_v, mem_v, proc_v = 0, 0, 0
+        if has_psutil:
+            try:
+                cpu_v = psutil.cpu_percent()
+                mem_v = psutil.virtual_memory().percent
+                proc_v = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            except:
+                pass
+
         info = [
             f"{w}x{h}  {fps_show}fps",
+            f"CPU:{cpu_v:.0f}%  RAM:{mem_v:.0f}%",
             f"Photos: {photo_count}",
-            "SPACE=拍照  Q=退出",
+            "SPACE:shot  Q:quit",
         ]
         y = 28
         for line in info:
@@ -497,27 +661,36 @@ def camera_mode(ocr_engine):
         key = cv2.waitKey(20) & 0xFF
 
         if key == ord(' '):
-            # 拍照
-            photo_count += 1
-            path = os.path.join(SAVE_DIR, f'photo_{photo_count}.jpg')
-            ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
-            if ok:
-                with open(path, 'wb') as f:
-                    f.write(buf)
-                sz = os.path.getsize(path) / 1024
-                print(f"\n{'='*60}")
-                print(f"  [已保存] photo_{photo_count}.jpg ({sz:.0f}KB)")
+            # ★ 智能快门: 等待稳定 + 多帧选最清晰
+            print("  [SHUTTER] capturing...", end='', flush=True)
+            photo_frame = _smart_shutter(cap, wait_ms=350, burst=5)
 
-                # 立即识别
-                result = ocr_engine.recognize(frame)
-                if result:
-                    print_result(result, path)
+            if photo_frame is not None:
+                photo_count += 1
+                path = os.path.join(SAVE_DIR, f'photo_{photo_count}.jpg')
+                ok, buf = cv2.imencode('.jpg', photo_frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                if ok:
+                    with open(path, 'wb') as f:
+                        f.write(buf)
+                    sz = os.path.getsize(path) / 1024
+                    score = _sharpness_score(photo_frame)
+                    print(f" done! (sharpness={score:.0f}, {sz:.0f}KB)")
+
+                    # 立即 OCR 识别
+                    print(f"\n{'='*60}")
+                    print(f"  [已保存] photo_{photo_count}.jpg ({sz:.0f}KB)")
+                    result = ocr_engine.recognize(photo_frame)
+                    if result:
+                        print_result(result, path)
+            else:
+                print(" FAILED")
 
         elif key == ord('q'):
             break
 
     cap.release()
     cv2.destroyAllWindows()
+    print(f"\nDone! {photo_count} photos saved.")
 
 
 # ============================================================
@@ -533,17 +706,61 @@ def print_result(result, source_name=""):
             continue
         filtered.append((text, score))
 
+    # ★ 屏蔽药品说明书元信息章节
+    if HIDE_DRUG_META:
+        hidden = 0
+        hiding = False
+        output = []
+        for text, score in filtered:
+            is_section_header = any(
+                text.strip().startswith(h) or h in text
+                for h in HIDE_SECTION_HEADERS
+            )
+            # 检测是否是任何【xxx】章节标题（用于退出隐藏状态）
+            is_any_section = '【' in text and '】' in text
+
+            if is_section_header:
+                # 进入隐藏章节
+                hiding = True
+                hidden += 1
+                continue
+            elif hiding and is_any_section:
+                # 遇到新章节标题 → 退出隐藏
+                hiding = False
+                output.append((text, score))
+            elif not hiding:
+                # 正常内容，直接输出
+                output.append((text, score))
+            else:
+                # 隐藏章节内的内容 → 跳过
+                hidden += 1
+        filtered = output
+        _hidden_count = hidden
+    else:
+        _hidden_count = 0
+
     count = len(filtered)
     total = result['count']
-    skipped = total - count
+    skipped = total - count - _hidden_count
 
-    print(f"  ┌─ 识别到 {total} 段文字（过滤 {skipped} 条水印），显示 {count} 段，平均置信度 {result['avg_score']:.3f}")
+    status_parts = [f"识别到 {total} 段文字"]
+    if skipped > 0:
+        status_parts.append(f"过滤 {skipped} 条水印")
+    if _hidden_count > 0:
+        status_parts.append(f"屏蔽 {_hidden_count} 条元信息")
+    status_parts.append(f"显示 {count} 段")
+    status_parts.append(f"平均置信度 {result['avg_score']:.3f}")
+
+    print(f"  ┌─ {' | '.join(status_parts)}")
     if count == 0:
         print("  │  （全部被过滤或无文字）")
     else:
         print("  │")
         for text, score in filtered:
-            tag = "" if score >= 0.95 else f"  [{score:.2f}]"
+            if SHOW_SCORES:
+                tag = "" if score >= 0.95 else f"  [{score:.2f}]"
+            else:
+                tag = ""
             print(f"  │  {text}{tag}")
     print("  │")
     print(f"  └─ 耗时: 检测{result['elapsed_det']:.2f}s + 分类{result['elapsed_cls']:.2f}s + 识别{result['elapsed_rec']:.2f}s = 总计{result['elapsed']:.2f}s")

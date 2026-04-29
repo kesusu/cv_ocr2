@@ -1,0 +1,10 @@
+﻿python :   File "<string>", line 19
+所在位置 行:1 字符: 196
++ ... .Encoding]::UTF8; cd "c:\Users\ke\Desktop\嵌赛\cv"; python -X utf8 -c "
++                                                       ~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 19:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    print('>>> 匹配行 [%d]: " %s\
+                              ^
+SyntaxError: EOL while scanning string literal

@@ -42,72 +42,45 @@ def find_best_camera():
 
 def setup_camera(cap):
     """
-    设置摄像头参数 - 只设分辨率/格式/MJPG, 不动进光量参数
-    (亮度/曝光/增益由摄像头AE自动管理, 避免过曝和拖影)
+    设置摄像头参数 - 优化清晰度
     """
     # --- 分辨率 & 帧率 ---
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_FPS, 30)
 
-    # --- MJPG格式 (原生支持, 清晰度最好) ---
+    # --- MJPG格式 (原生支持，清晰度最好) ---
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-    # --- 以下参数不再手动设置 ---
-    # BRIGHTNESS / EXPOSURE / GAIN: 由摄像头自动AE管理
-    #   设定值会导致: ① 过曝(已验证) ② 曝光时间过长→拖影
-    # SHARPNESS / CONTRAST / SATURATION: 保持出厂默认
-    # AUTO_WB: 默认开启
+    # --- 图像参数优化 ---
+    # 降低增益减少噪点，提升锐度来弥补
+    cap.set(cv2.CAP_PROP_BRIGHTNESS, 160)   # 亮度适中
+    cap.set(cv2.CAP_PROP_CONTRAST, 150)      # 提高对比度让细节更分明
+    cap.set(cv2.CAP_PROP_SATURATION, 115)    # 饱和度稍低更自然
 
+    # 锐度 (重要！提升清晰感)
+    try:
+        cap.set(cv2.CAP_PROP_SHARPNESS, 200)   # 提高锐度
+    except:
+        pass
 
-def _sharpness_score(frame):
-    """
-    计算图像清晰度评分 (Laplacian 方差)
-    值越大 = 边缘越锐利 = 越清晰
-    """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
+    # 增益 (降低减少噪点)
+    try:
+        cap.set(cv2.CAP_PROP_GAIN, 100)        # 降低增益
+    except:
+        pass
 
+    # 曝光 (让DSP自动处理)
+    try:
+        cap.set(cv2.CAP_PROP_EXPOSURE, -3)     # 稍暗一点，减少过曝
+    except:
+        pass
 
-def _smart_shutter(cap, wait_ms=350, burst=5):
-    """
-    智能快门: 解决手持拍照拖影问题
-    
-    流程:
-      1. 等待 wait_ms 毫秒 (让手停稳)
-      2. 连续抓取 burst 帧
-      3. 用 Laplacian 方差选最清晰的一帧
-    
-    参数:
-        wait_ms:   按下快门后的等待时间(默认350ms)
-        burst:     连续抓拍帧数(默认5帧, 约167ms@30fps)
-    
-    返回: 最清晰的 frame
-    """
-    # 阶段1: 等待稳定 (丢弃缓冲区中的旧帧)
-    start = time.time()
-    while (time.time() - start) * 1000 < wait_ms:
-        cap.read()
-
-    # 阶段2: 连续抓拍多帧, 选最清晰的
-    best_frame = None
-    best_score = -1
-
-    for _ in range(burst):
-        ret, frame = cap.read()
-        if ret and frame is not None:
-            score = _sharpness_score(frame)
-            if score > best_score:
-                best_score = score
-                best_frame = frame.copy()
-
-    # 回退: 如果所有帧都失败, 读一帧返回
-    if best_frame is None:
-        ret, best_frame = cap.read()
-        if not ret or best_frame is None:
-            return None
-
-    return best_frame
+    # 白平衡 (让DSP自动处理)
+    try:
+        cap.set(cv2.CAP_PROP_AUTO_WB, 1)        # 开启自动白平衡
+    except:
+        pass
 
 
 def _get_next_photo_id(save_dir):
@@ -156,8 +129,7 @@ def main():
     cv2.resizeWindow(win, 960, 540)
 
     print(f"[OK] {w}x{h} @ 30fps | Format: {fourcc_str}")
-    print("  Smart Shutter: ON (anti-shake, 5-frame burst)")
-    print("\n  SPACE -> Take photo (auto anti-shake)")
+    print("\n  SPACE -> Take photo")
     print("  Q     -> Quit\n")
 
     photo_count = _get_next_photo_id(SAVE_DIR)   # 自动接续已有编号，不覆盖
@@ -208,22 +180,14 @@ def main():
         key = cv2.waitKey(20) & 0xFF
 
         if key == ord(' '):
-            # 智能快门: 等待稳定 + 多帧选最清晰
-            print("  [SHUTTER] capturing...", end='', flush=True)
-            photo_frame = _smart_shutter(cap, wait_ms=350, burst=5)
-
-            if photo_frame is not None:
-                photo_count += 1
-                path = os.path.join(SAVE_DIR, f'photo_{photo_count}.jpg')
-                ok, buf = cv2.imencode('.jpg', photo_frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
-                if ok:
-                    with open(path, 'wb') as f:
-                        f.write(buf)
-                    sz = os.path.getsize(path) / 1024
-                    score = _sharpness_score(photo_frame)
-                    print(f" done! (sharpness={score:.0f}, {sz:.0f}KB)")
-            else:
-                print(" FAILED - no frame")
+            photo_count += 1
+            path = os.path.join(SAVE_DIR, f'photo_{photo_count}.jpg')
+            ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            if ok:
+                with open(path, 'wb') as f:
+                    f.write(buf)
+                sz = os.path.getsize(path) / 1024
+                print(f"  [SAVED] photo_{photo_count}.jpg ({sz:.0f}KB)")
 
         elif key == ord('q'):
             break
