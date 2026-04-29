@@ -44,11 +44,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, 'photos')
 
 # ── 模式选择 ──
-MODE = 1   # 1=图片识别    2=摄像头拍照+识别
+MODE = 2   # 1=图片识别    2=摄像头拍照+识别
 
 # ── 模式1：填要识别的图片路径（多张放列表，# 注释掉不需要的）──
 IMAGE_PATHS = [
-     "photos/photo_10.jpg",
+     "photos/photo_14.jpg",
     # "photos/藿香正气水.jpg",
     #"photos/细菌溶解产物胶囊.jpg",
 ]
@@ -71,13 +71,19 @@ HIDE_DRUG_META = 1            # ← 第64行：0关 1开
 # 需要屏蔽的章节标题 (以【开头】结尾)
 HIDE_SECTION_HEADERS = [       # ← 第67行：在此增减屏蔽的章节
     "【执行标准】", "【批准文号】", "【说明书修订日期】",
-    "【上市许可持有人】", "【生产企业】", "【包装】", 
+    "【上市许可持有人】", "【生产企业】", "【包装】", "【境内联系机构】", "【药品上市许可持有人】", 
 ]
+
 
 # ── ★ 显示置信度分数 ──
 #     1=每条结果后显示 [0.95] 这样的分数 (调试用)
 #     0=不显示分数 (正式输出更简洁)
 SHOW_SCORES = 0                # ← 第76行：1显示  0隐藏
+
+# ── ★ 摄像头模式: 拍照后自动退出 ──
+#     1=预览窗口 → 空格拍照(防抖+OCR) → 识别完自动关闭退出 (适合开发板/批量)
+#     0=预览窗口 → 空格拍照后继续预览，需手动Q键退出 (PC调试交互模式)
+CAMERA_AUTO_SHOT = 1           # ← 第85行：1=拍完自动退出  0=手动Q退出
 
 # ── OCR 检测参数（一般不用动）──
 OCR_PARAMS = {
@@ -496,44 +502,36 @@ class OCREngine:
 # ============================================================
 
 def find_best_camera():
-    """自动扫描所有摄像头，选择最高分辨率的那个"""
-    best_idx, best_res = None, 0
-    for i in range(5):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+    """快速探测摄像头设备（轻量版，不读帧不设参）
+
+    开发板需要 root 权限访问 /dev/video*
+    已知开发板 USB 摄像头通常在 /dev/video2，优先探测
+    """
+    # ★ 快速路径: 先试已知索引 (开发板 video2)
+    for priority_idx in [2, 0, 1, 3, 4]:
+        cap = cv2.VideoCapture(priority_idx, cv2.CAP_V4L2)
         if cap.isOpened():
-            ret, f = cap.read()
-            if ret and f is not None:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                ret2 = cap.read()[0]
-                if ret2:
-                    mw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    mh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    res = mw * mh
-                    if res > best_res:
-                        best_res, best_idx = res, i
             cap.release()
-    return best_idx
+            return priority_idx
+
+    # ★ 回退: 如果全部失败返回 None
+    return None
 
 
 def setup_camera(cap):
     """
-    设置摄像头参数 - 只设分辨率/格式/MJPG, 不动进光量参数
+    设置摄像头参数 - 分辨率/格式/MJPG/帧率
     (亮度/曝光/增益由摄像头AE自动管理, 避免过曝和拖影)
+
+    ★ 注意: V4L2 下必须先设 FOURCC 再设分辨率，顺序很重要
     """
+    # --- MJPG格式 (必须先于分辨率设置) ---
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
     # --- 分辨率 & 帧率 ---
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_FPS, 30)
-
-    # --- MJPG格式 (原生支持, 清晰度最好) ---
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-
-    # --- 以下参数不再手动设置 ---
-    # BRIGHTNESS / EXPOSURE / GAIN: 由摄像头自动AE管理
-    #   设定值会导致: ① 过曝(已验证) ② 曝光时间过长→拖影
-    # SHARPNESS / CONTRAST / SATURATION: 保持出厂默认
-    # AUTO_WB: 默认开启
 
 
 def _sharpness_score(frame):
@@ -586,9 +584,12 @@ def camera_mode(ocr_engine):
     cam_idx = find_best_camera()
     if cam_idx is None:
         print("ERROR: 未找到摄像头!")
+        print("       请确认:")
+        print("         1. USB 摄像头已插入 (ls /dev/video*)")
+        print("         2. 使用 root 权限运行 (sudo python3 ...)")
         return
 
-    cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
+    cap = cv2.VideoCapture(cam_idx, cv2.CAP_V4L2)
     if not cap.isOpened():
         print("ERROR: 无法打开摄像头!")
         return
@@ -597,6 +598,9 @@ def camera_mode(ocr_engine):
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # ── 自动拍完即退模式 (CAMERA_AUTO_SHOT=1) ──
+    #     删掉之前的错误实现(不需要单独分支)，直接在空格拍照后判断是否break
+    # ── 交互预览模式 (CAMERA_AUTO_SHOT=0/1共用，仅退出行为不同) ──
     win = 'Camera'
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 960, 540)
@@ -620,7 +624,10 @@ def camera_mode(ocr_engine):
     except:
         has_psutil = False
 
-    print(f"[OK] {w}x{h} | SPACE=拍照(防抖)  Q=退出\n")
+    if CAMERA_AUTO_SHOT:
+        print(f"[OK] {w}x{h} | SPACE=拍照(识别后自动退出)  Q=取消\n")
+    else:
+        print(f"[OK] {w}x{h} | SPACE=拍照(防抖)  Q=退出\n")
     print("提示: 按空格后等待~350ms稳定, 连拍5帧选最清晰\n")
 
     while True:
@@ -682,6 +689,11 @@ def camera_mode(ocr_engine):
                     result = ocr_engine.recognize(photo_frame)
                     if result:
                         print_result(result, path)
+
+                    # ★ 模式1: 拍完OCR后自动退出，不需要手动按Q
+                    if CAMERA_AUTO_SHOT:
+                        print("\n[AUTO] 识别完成，自动退出...")
+                        break
             else:
                 print(" FAILED")
 
