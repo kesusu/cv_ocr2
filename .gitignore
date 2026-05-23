@@ -6,11 +6,7 @@ easyocr-onnx-float/
 easyocr-onnx-w8a8/
 qual_dlc版本高了/
 
-# 大模型文件
-*.dlc
-*.onnx
-*.pth
-*.pkl
+# 大数据文件
 *.npy
 *.tar
 
