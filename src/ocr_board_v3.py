@@ -67,7 +67,7 @@ except Exception as e:
 # ── 基础路径 ──
 # 开发板上模型存放目录，根据实际部署路径修改
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, 'pp-ocrv4_rapid_onnx')
+MODEL_DIR = os.path.join(BASE_DIR, '..', 'pp-ocrv4_rapid_onnx')
 SAVE_DIR = os.path.join(BASE_DIR, 'photos')
 
 # ── 模型文件名 ──

@@ -3,24 +3,70 @@
 ## 项目文件结构
 
 ```
-cv/                                    ← 项目根目录
+cv_pc/                                 ← 项目根目录
 │
-├── ocr_workflow_onnx.py               ★ 主程序（拍照+预处理+OCR）
-├── camera_test.py                      摄像头独立测试（备用）
-├── paddleocr_test.py                   PaddleOCR 测试（备用，需联网下载模型）
+├── ocr_workflow_accelerated.py        ★ PC端主程序（对外接口, 对标 asr.py）
+│                                      └─ 6个接口: init_ocr / recognize_image / recognize_image_full
+│                                           batch_recognize / set_ocr_callback / get_ocr_status
 │
-├── pp-ocrv4_rapid_onnx/                ★ ONNX 模型目录（必须带！）
-│   ├── ch_PP-OCRv4_det_mobile.onnx     ★ 文本检测模型
-│   ├── ch_PP-OCRv4_rec_mobile.onnx     ★ 文字识别模型
-│   ├── ch_ppocr_mobile_v2.0_cls_mobile.onnx  ★ 方向分类模型
-│   ├── ppocr_keys_v1.txt               ★ 中文字典（6623个字符）
+├── asr.py                             ASR语音识别（接口风格参考, 回调模式一致）
+├── api_infer.py                       API推理入口
+│
+├── OCR接口.md                          ★ OCR对外接口使用文档（给队友看这个）
+├── DEPLOY.md                          本文档（部署指南）
+├── PROJECT_SUMMARY.md                 项目完整总结
+│
+├── ocr_workflow_onnx_pc.py            PC版OCR（旧版, 已被 accelerated 替代）
+├── ocr_workflow_onnx_linux.py         Linux/开发板版OCR（业务逻辑来源）
+├── ocr_board_v3.py                    板端加速版V3（推理引擎来源）
+├── ocr_board.py                       板端版（更早版本）
+│
+├── camera_test.py / camera_test_improve.py / camera_test copy.py   摄像头相关
+├── paddleocr_test.py                  PaddleOCR原版测试
+├── test_easyocr_w8a8.py               EasyOCR W8A8量化测试
+│
+├── pp-ocrv4_rapid_onnx/               ★ ONNX模型目录（必须带！）
+│   ├── ch_PP-OCRv4_det_mobile.onnx     ★ 文本检测 Det (~4.5MB)
+│   ├── ch_PP-OCRv4_rec_mobile.onnx     ★ 文字识别 Rec 主用 (~10.3MB)
+│   ├── ch_ppocr_mobile_v2.0_cls_mobile.onnx  ★ 方向分类 Cls (~0.5MB)
+│   ├── ppocr_keys_v1.txt               ★ 中文字典 (6623字符)
 │   │
-│   ├── ch_PP-OCRv4_det_infer.onnx      ✗ 不需要（server版，未使用）
-│   ├── ch_PP-OCRv4_rec_infer.onnx      ✗ 不需要（server版，未使用）
-│   ├── ch_ppocr_mobile_v2.0_cls_infer.onnx  ✗ 不需要（infer版，未使用）
-│   └── ppocrv5_dict.txt                ✗ 不需要（v5字典，当前用的是v4）
+│   ├── ch_PP-OCRv4_rec_mobile_int8.onnx    官方INT8量化 (实验性, 不用于生产)
+│   ├── ch_PP-OCRv4_rec_mobile_custom_int8.onnx  自量化INT8 (实验性)
+│   ├── *.dlc                            骁龙NPU格式 (开发板用, PC不用管)
+│   └── infer/                           旧版infer模型 (未使用)
 │
-└── photos/                             测试图片目录
+├── photos/                             测试图片 (18张药品说明书)
+│
+├── 板端数据（测试）/                   开发板测试数据与脚本
+├── easyocr-onnx-w8a8/                 EasyOCR W8A8量化模型
+├── easyocr_md/                        EasyOCR相关文档
+├── yolo人体检测/                      YOLO人体检测模块
+│
+├── _leak_analysis.txt                 内存泄漏分析
+├── 板端精度下降诊断报告.md             精度问题诊断
+└── ocr_test_result.txt                OCR测试结果记录
+```
+
+### 核心文件说明
+
+| 文件 | 角色 | 说明 |
+|------|:----:|------|
+| `ocr_workflow_accelerated.py` | **★ 主程序** | PC端最终整合版, 含6个对外接口 |
+| `asr.py` | 接口参考 | ASR回调模式, OCR接口与其对齐 |
+| `OCR接口.md` | **★ 使用文档** | 队友看这个就能调用OCR |
+| `pp-ocrv4_rapid_onnx/` | **★ 模型** | 最少只需4个文件 (见下方) |
+
+### PC部署最少携带
+
+```
+pp-ocrv4_rapid_onnx/
+  ch_PP-OCRv4_det_mobile.onnx              (4.5 MB)
+  ch_PP-OCRv4_rec_mobile.onnx              (10.3 MB)
+  ch_ppocr_mobile_v2.0_cls_mobile.onnx     (0.5 MB)
+  ppocr_keys_v1.txt                         (0.03 MB)
+                                          ─────────
+                                          总计 ~15.3 MB
 ```
 
 ---
