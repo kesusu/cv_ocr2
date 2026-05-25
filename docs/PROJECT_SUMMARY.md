@@ -1335,6 +1335,7 @@ FILTER_KEYWORDS = [
 | 4 | **fastNlMeansDenoising 对中小字号有害** — 用锐化+CLAHE 替代去噪 | 低分辨率文字识别 |
 | 5 | **逐步排查法定位问题**: 原图→Step1→Step2→Step3 逐一验证 | 调试管线类 Bug |
 | 6 | **水印过滤需要考虑 OCR 的错别字变体** (如 Photos→Photas) | 结果后处理 |
+| 7 | **摄像头画面抽搐/出现两条明显黑线** → 换 USB 口即可解决，非代码问题 | USB 摄像头硬件排查 |
 
 ---
 

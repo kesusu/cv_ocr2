@@ -1,13 +1,24 @@
 """
-OCR 工作流 — 图片识别 / 摄像头拍照识别
+OCR 工作流 — 图片识别 / 摄像头拍照识别 (旧版·已归档)
 =============================================================
+★ 此文件已归档到 archive/，仅作历史参考 ★
+★ 当前使用请到 src/ 下运行 ocr_workflow_accelerated.py ★
+=============================================================
+
+📌 已记录 Bug (2026-05-25): 摄像头画面抽搐/出现两条明显黑线
+   根因: 电脑 USB 口硬件问题，换一个 USB 口插入后恢复正常。
+   结论: 非代码逻辑或驱动问题，cap.set() 参数已清理干净无影响。
+   排查时可以优先换个 USB 口试试。
+
 依赖: pip install rapidocr opencv-python numpy psutil
 用法: python ocr_workflow_onnx.py
 
+说明: 此版本基于 RapidOCR 封装层实现，是早期探索版本的产物。
+后续已重构为 原生 ONNX Runtime 直推 + 自研 Det→Cls→Rec 三阶段流水线
+（更高可控性、更低依赖、更易排查问题），最终在 ocr_workflow_accelerated.py 落地。
+
 识别结果: 直接打印到终端 (控制台)
 拍照保存: photos/ 目录下 (摄像头模式自动保存 jpg)
-
-★ 只需改下方配置区，然后运行即可 ★
 
 常用配置 (每次使用可能需要调整):
   MODE              运行模式: 1=图片识别  2=摄像头拍照+OCR
@@ -44,7 +55,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, 'photos')
 
 # ── 模式选择 ──
-MODE = 1   # 1=图片识别    2=摄像头拍照+识别
+MODE = 2   # 1=图片识别    2=摄像头拍照+识别
 
 # ── 模式1：填要识别的图片路径（多张放列表，# 注释掉不需要的）──
 IMAGE_PATHS = [
